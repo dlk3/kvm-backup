@@ -1,0 +1,357 @@
+#!/usr/bin/env python
+
+#  Backup the KVM named on the command line
+#
+#  This script cannot handle backing up KVMs that have snapshots.  The logic
+#  needed to walk the backing file tree and capture all the necessary files
+#  is missing.  This script checks if the domain has snapshots and errors if it
+#  does.
+#
+#  If the KVM is active, a temporary snapshot is created to freeze the disk 
+#  image file(s) while the backup (disk image file copy) is being performed.
+#  That snapshot is given the name contained in "snapshot_name" below.
+#
+#  The XML description of the KVM and all of its disk image files are stored
+#  in a timestamped ZIP file in the "backup_target_dir" directory
+#
+#  Each disk image file that is part of the KVM configuration is rsynced across 
+#  to the "backup_target_dir" and then stored in that same timestamped ZIP file.
+#
+#  If the KVM name entered on the command line matches a domain name in the
+#  "known_domains" list, then we look for a domain with that name on the
+#  host at the matching "host_uri"
+#
+#  If the KVM name entered on the command line is not in the "known_domains"
+#  list, then we look for a domain by that name on the host at the 
+#  "default_host_uri"
+#
+#  Snapshot cleanup commands:
+#
+#    virsh snapshot-list fileserver
+#    virsh domblklist fileserver
+#    virsh blockcommit fileserver /var/lib/libvirt/images/fileserver.kvm-backup --pivot
+#    virsh snapshot-delete fileserver --snapshotname kvm-backup --metadata
+#    rm /var/lib/libvirt/images/fileserver.kvm-backup
+#
+#    If blockcommit is still pending then look to see if it is complete ("100%"):
+#       virsh blockjob fileserver /var/lib/libvirt/images/fileserver.kvm-backup --info
+#    If it is complete, then you can finish the pivot process with:
+#       virsh blockjob fileserver /var/lib/libvirt/images/fileserver.kvm-backup --abort --pivot
+
+snapshot_name = 'kvm-backup'
+
+backup_target_dir = '/raidarray/kvm-backups'
+
+known_domains = [
+	{
+		'name' : 'netmon',
+		'host_uri' : 'qemu+ssh://root@dlk-kvm2.localdomain/system',
+	},
+	{
+		'name' : 'fileserver',
+		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
+	},
+	{
+		'name' : 'dhcpdns',
+		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
+	},
+]
+
+default_host_uri = 'qemu+ssh://root@dlk-kvm.localdomain/system'
+
+##########  E n d   o f   c o n f i g u r a t i o n   s e c t i o n  ##########
+
+import libvirt
+from optparse import OptionParser
+from xml.dom import minidom
+import shlex
+import subprocess
+import os
+import sys
+import re
+import zipfile
+import datetime
+import pprint
+import glob
+import traceback
+import threading
+import time
+import pprint
+
+#  Run a shell command, returning True if it ran successfully. Exit the program 
+#  if it failed.
+def doCmd(cmdline, return_output=False):
+	args = shlex.split(cmdline)
+	try:
+		#  Do command
+		output = subprocess.check_output(args, stderr=subprocess.STDOUT)
+		if return_output:
+			return output
+		else:
+			return True
+	except Exception as e:
+		print 'Command failed: {}'.format(cmdline)
+		print '{}: {}'.format(e.returncode, e.output)
+		exc_type, exc_value, exc_traceback = sys.exc_info()
+		traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stdout)
+		sys.exit(1)
+
+#  Return a list of image file names for each disk contained in the named domain.
+def getDiskFileList(domain):
+	#  Start off with an empty disk list
+	disk_file_list = []
+
+	#  Get the XML description
+	xml = minidom.parseString(domain.XMLDesc())
+
+	#  Look at each disk definition in the XML
+	for devices in xml.getElementsByTagName('devices'):
+		for disk in devices.getElementsByTagName('disk'):
+
+			#  If that disk is an external file image,
+			#  add it to the disk_list
+			if disk.getAttribute('device') == 'disk' and disk.getAttribute('type') == 'file':
+				source = disk.getElementsByTagName('source')
+				file = source[0].getAttribute('file')
+				disk_file_list.append(file)
+
+	#  Return the disk_list
+	return disk_file_list
+                
+#  Return a list of tuples, with the device name and its image file name for
+#  each disk contained in the named snapshot.
+def getSnapshotDiskList(domain, snapshot_name):
+	#  Start off with an empty disk list
+	disk_list = []
+
+	#  Get the XML description
+	snapshot = domain.snapshotLookupByName(snapshot_name)
+	xml = minidom.parseString(snapshot.getXMLDesc())
+
+	#  Look at each disk definition in the XML
+	for disks in xml.getElementsByTagName('disks'):
+		for disk in disks.getElementsByTagName('disk'):
+
+			#  If that disk is an external file snapshot
+			#  add it to the disk_list
+			if disk.getAttribute('snapshot') == 'external' and disk.getAttribute('type') == 'file':
+				device = disk.getAttribute('name')
+				source = disk.getElementsByTagName('source')
+				file = source[0].getAttribute('file')
+				disk_list.append((device, file))
+
+	#  Return the disk_list
+	return disk_list
+
+#  Event handler for asynchronous events issued by the 2-phase blockCommit 
+#  process
+def blockJobTypeToString(type):
+	blockJobTypes = ( "unknown", "Pull", "Copy", "Commit", "ActiveCommit", )
+	return blockJobTypes[type]
+def blockJobStatusToString(status):
+	blockJobStatus = ( "Completed", "Failed", "Canceled", "Ready", )
+	return blockJobStatus[status]
+def blockJobCallback(conn, dom, disk, type, status, opaque):
+	global domain, device, finished
+	#  End of phase 1
+	if (disk == device) and (status == libvirt.VIR_DOMAIN_BLOCK_JOB_READY):
+		jobinfo = domain.blockJobInfo(device)
+		if jobinfo['cur'] == jobinfo['end']:
+			#  Phase 2: Pivot from the snapshot to the base disk
+			flags = libvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_PIVOT
+			domain.blockJobAbort(device, flags=flags)
+	#  End of phase 2
+	elif (disk == device) and (status == libvirt.VIR_DOMAIN_BLOCK_JOB_COMPLETED):
+		#  Set flag indicating that the process is complete
+		finished = True
+	else:
+		print "UNEXPECTED JOB EVENT: Domain {}, job type {}, on disk {}, status {}".format(dom.name(), blockJobTypeToString(type), disk, blockJobStatusToString(status))
+def virEventLoopNativeRun():
+	while True:
+		libvirt.virEventRunDefaultImpl()
+def virEventLoopNativeStart():
+	global eventLoopThread
+	libvirt.virEventRegisterDefaultImpl()
+	eventLoopThread = threading.Thread(target=virEventLoopNativeRun, name="libvirtEventLoop")
+	eventLoopThread.setDaemon(True)
+	eventLoopThread.start()
+
+def log(logfile, message):
+	f = open(logfile, 'a')
+	now = datetime.datetime.now()
+	f.write("{} {}\n".format(now.strftime('%Y-%m-%d %H:%M:%S'), message))
+	f.close
+	
+def backupVM(domain_name, uri, delete_old=False):
+	global domain, device, finished
+
+	#  Get ready to write output to a log file
+	logfile = os.path.join(backup_target_dir, domain_name + '.log')
+	if os.path.isfile(logfile):
+		os.remove(logfile)
+
+	#  Connect to the host
+	log(logfile, 'Connecting to {}'.format(uri))
+	conn = libvirt.open(uri)
+	if conn == None:
+		log(logfile,'Unable to connect to {}'.format(uri))
+		print 'Unable to connect to {}'.format(uri)
+		sys.exit(1)
+		
+	#  Get the domain object for this domain_name
+	try:
+		domain = conn.lookupByName(domain_name)
+	except:
+		log(logfile, 'Unable to find a domain named "{}"'.format(domain_name))
+		print 'Unable to find a domain named "{}"'.format(domain_name)
+		sys.exit(1)
+		
+	if domain.hasCurrentSnapshot():
+		log(logfile, '{} has snapshots, cannot back it up using this script'.format(domain_name))
+		print '{} has snapshots, cannot back it up using this script'.format(domain_name)
+		sys.exit(1)
+
+	#  Open a zip file and add the domain XML description to it
+	timestamp = '{:%Y-%m-%dT%H:%M:%S}'.format(datetime.datetime.now())
+	zip_file_name = '{}-{}.zip'.format(os.path.join(backup_target_dir, domain_name), timestamp)
+	log(logfile,'Backing up {} XML to {}'.format(domain_name, zip_file_name))
+	zip = zipfile.ZipFile(zip_file_name, mode='w', compression=zipfile.ZIP_DEFLATED, allowZip64=True)
+	xml_file_name = '{}.xml'.format(os.path.join(backup_target_dir, domain_name))
+	with open(xml_file_name, 'w') as xml_file:
+		flags = libvirt.VIR_DOMAIN_XML_INACTIVE + libvirt.VIR_DOMAIN_XML_SECURE
+		xml_file.write(domain.XMLDesc(flags=flags))
+	zip.write(xml_file_name)
+	os.unlink(xml_file_name)
+
+	#  Store any firmware files listed in the domain XML
+	xml = minidom.parseString(domain.XMLDesc())
+	for nodes in xml.getElementsByTagName('os'):
+		for loader in nodes.getElementsByTagName('loader'):
+			log(logfile,'Putting {} into {}'.format(loader.firstChild.nodeValue, zip_file_name))
+			zip.write(loader.firstChild.nodeValue)
+		for nvram in nodes.getElementsByTagName('nvram'):
+			log(logfile,'Putting {} into {}'.format(nvram.firstChild.nodeValue, zip_file_name))
+			zip.write(nvram.firstChild.nodeValue)
+	
+	#  Get the list of files that need to be backed up (this assumes no
+	#  snapshots, i.e., does not traverse tha backing store chain)
+	file_list = getDiskFileList(domain)
+		
+	#  If the VM is running, create a domain snapshot that will catch all the 
+	#  changes that are made while we're doing the backup
+	if domain.isActive():
+		log(logfile, 'This domain is currently active, creating a domain snapshot')
+		if domain_name == 'fileserver':
+			#  Do not snapshot the RAID array on the fileserver system, it will not be backed up by this process
+			xml = '<domainsnapshot><name>{}</name><disks><disk name="vdb" snapshot="no"/></disks></domainsnapshot>'.format(snapshot_name)
+		else:
+			xml = '<domainsnapshot><name>{}</name></domainsnapshot>'.format(snapshot_name)
+		flags = libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY + libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_ATOMIC
+		domain.snapshotCreateXML(xml, flags=flags)
+	
+	#  Copy the disk files
+	sha1sum_file_name = os.path.join(backup_target_dir, 'sha1sum')
+	with open(sha1sum_file_name, 'w') as sha1sum_file:
+		for file_name in file_list:
+			#  Get the sha1sum for the disk file from the remote host
+			match = re.search('.*//([^/]*)/.*', uri)
+			if match:
+				cmdline = 'ssh {} \'sha1sum "{}"\''.format(match.group(1), file_name)
+				log(logfile, 'Calculating sha1sum for {}'.format(file_name))
+				sha1sum_file.write(doCmd(cmdline, return_output=True))
+
+			log(logfile, 'Copying {} from server to local disk'.format(file_name))
+			ssh_uri = re.sub(r'.*[^:]*//([^/]*)/.*', '\\1', uri)
+			cmdline = 'rsync --archive --sparse {}:{} {}'.format(ssh_uri, file_name, os.path.join(backup_target_dir, '')) 
+			doCmd(cmdline)
+
+			#  Add the file to the zip file and delete the local file
+			backup_file_name = os.path.join(backup_target_dir, os.path.basename(file_name))
+			log(logfile, 'Putting {} into {}'.format(os.path.basename(file_name), zip_file_name))
+			zip.write(backup_file_name, arcname=file_name)
+			os.unlink(backup_file_name)
+
+	if os.path.isfile(sha1sum_file_name):
+		zip.write(sha1sum_file_name, arcname=os.path.basename(sha1sum_file_name))
+		os.unlink(sha1sum_file_name)
+	zip.close()
+
+	#  Delete all of the other backups for this daemon when requested
+	if delete_old:
+		log(logfile, 'Erasing previous {} backups'.format(domain_name))
+		for fn in glob.glob('{}*.zip'.format(os.path.join(backup_target_dir, domain_name))):
+			if fn != zip_file_name:
+				os.unlink(fn)
+	
+	#  Merge down the changes for each disk in the snapshot
+	if domain.isActive():
+		log(logfile, 'Removing the domain snapshot')
+
+		#  Register the event handler for the asynchronous events issed by the 
+		#  2-phase blockCommit process
+		eventLoopThread = None
+		virEventLoopNativeStart()
+		conn.domainEventRegisterAny(None, libvirt.VIR_DOMAIN_EVENT_ID_BLOCK_JOB_2, blockJobCallback, None)
+
+		for snapshot in domain.listAllSnapshots():
+			if snapshot.getName() == snapshot_name:
+				snapshot_xml = minidom.parseString(snapshot.getXMLDesc())
+				for snapshot_disks in snapshot_xml.getElementsByTagName('disks'):
+					for snapshot_disk in snapshot_disks.getElementsByTagName('disk'):
+						if snapshot_disk.getAttribute('snapshot') != 'no':
+							device = snapshot_disk.getAttribute('name')
+							for snapshot_source in snapshot_disk.getElementsByTagName('source'):
+								snapshot_file = snapshot_source.getAttribute('file')
+
+				#  Merge down the snapshot
+				flags = libvirt.VIR_DOMAIN_BLOCK_COMMIT_ACTIVE + libvirt.VIR_DOMAIN_BLOCK_COMMIT_SHALLOW
+				domain.blockCommit(device, None, None, flags=flags)
+
+				#  The rest of blockCommit process will be handled through 
+				#  asynchronous events.  Loop while we wait for them.
+				finished = False
+				start = time.time()
+				while not finished:
+					#  We have to do something like this in the loop or else
+					#  the async events are never recognized
+					domain.blockJobInfo(device)
+					
+					#  Check for timeout and raise exception if so
+					elapsed = time.time() - start
+					if elapsed > 1200:
+						raise RuntimeError('Snapshot removal process timed out at 20 minutes')
+
+				#  Remove the snapshot definition
+				flags = libvirt.VIR_DOMAIN_SNAPSHOT_DELETE_METADATA_ONLY
+				snapshot.delete(flags)
+
+				#  Close the connection to the server
+				conn.close()
+				
+				#  Erase the snapshot file
+				match = re.search('.*//([^/]*)/.*', uri)
+				if match:
+					cmdline = 'ssh {} \'rm -f "{}"\''.format(match.group(1), snapshot_file)
+					doCmd(cmdline)
+	
+def main():
+	
+	usage = 'Usage: {} [-o|--onecopy] vm_name'.format(os.path.basename(__file__))
+	parser = OptionParser(usage=usage)
+	parser.add_option('-o', '--onecopy', action='store_true', dest='delete_old', default=False, help='If this backup succeeds, erase all previous backups for this VM from {}'.format(backup_target_dir))
+	(options, args) = parser.parse_args()
+	if len(args) != 1:
+		print usage
+		exit(1)
+	else:
+		#  Look for this doamin in the list of known domains
+		for domain in known_domains:
+			#  If we found it, then use the params we know to back it up
+			if domain['name'] == args[0]:
+				backupVM(domain['name'], domain['host_uri'], delete_old=options.delete_old)
+				return
+		#  If we didn't find, try a backup based on a guess
+		backupVM(args[0], default_host_uri, delete_old=options.delete_old) 
+
+if __name__ == '__main__':
+    main()
