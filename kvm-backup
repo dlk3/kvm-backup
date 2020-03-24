@@ -44,64 +44,12 @@ backup_target_dir = '/raidarray/kvm-backups'
 
 known_domains = [
 	{
-		'name' : 'netmon',
-		'host_uri' : 'qemu+ssh://root@dlk-kvm2.localdomain/system',
-	},
-	{
-		'name' : 'bitcoin',
-		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
-	},
-	{
-		'name' : 'ioc4att',
-		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
-	},
-	{
-		'name' : 'fileserver',
-		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
-	},
-	{
-		'name' : 'dhcpdns',
-		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
-	},
-	{
-		'name' : 'zoneminder',
-		'host_uri' : 'qemu+ssh://root@dlk-kvm2.localdomain/system',
-	},
-	{
-		'name' : 'denon-remote',
-		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
-	},
-	{
-		'name' : 'Mercedes-EPC-WIS',
-		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
-	},
-	{
-		'name' : 'windows-10',
-		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
-	},
-	{
-		'name' : 'quicken',
-		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
-	},
-	{
-		'name' : 'turbotax4trust',
-		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
-	},
-	{
-		'name' : 'turbotax2018',
-		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
-	},
-	{
-		'name' : 'OSX',
-		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
-	},
-	{
-		'name' : 'Android-9',
-		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+		'name' : 'domainname',
+		'host_uri' : 'qemu+ssh://userid@host.localdomain/system',
 	}
 ]
 
-default_host_uri = 'qemu+ssh://root@dlk-kvm.localdomain/system'
+default_host_uri = 'qemu+ssh://userid@host.localdomain/system'
 
 ##########  E n d   o f   c o n f i g u r a t i o n   s e c t i o n  ##########
 
