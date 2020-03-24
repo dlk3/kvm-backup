@@ -1,9 +1,5 @@
 #!/usr/bin/env python
 
-#  This Source Code Form is subject to the terms of the Mozilla Public
-#  License, v. 2.0. If a copy of the MPL was not distributed with this
-#  file, You can obtain one at http://mozilla.org/MPL/2.0/.
-
 #  Backup the KVM named on the command line
 #
 #  This script cannot handle backing up KVMs that have snapshots.  The logic
@@ -52,6 +48,14 @@ known_domains = [
 		'host_uri' : 'qemu+ssh://root@dlk-kvm2.localdomain/system',
 	},
 	{
+		'name' : 'bitcoin',
+		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
+	},
+	{
+		'name' : 'ioc4att',
+		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
+	},
+	{
 		'name' : 'fileserver',
 		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
 	},
@@ -59,6 +63,42 @@ known_domains = [
 		'name' : 'dhcpdns',
 		'host_uri' : 'qemu+ssh://root@dlk-kvm.localdomain/system',
 	},
+	{
+		'name' : 'zoneminder',
+		'host_uri' : 'qemu+ssh://root@dlk-kvm2.localdomain/system',
+	},
+	{
+		'name' : 'denon-remote',
+		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+	},
+	{
+		'name' : 'Mercedes-EPC-WIS',
+		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+	},
+	{
+		'name' : 'windows-10',
+		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+	},
+	{
+		'name' : 'quicken',
+		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+	},
+	{
+		'name' : 'turbotax4trust',
+		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+	},
+	{
+		'name' : 'turbotax2018',
+		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+	},
+	{
+		'name' : 'OSX',
+		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+	},
+	{
+		'name' : 'Android-9',
+		'host_uri' : 'qemu+ssh://root@fang.localdomain/system',
+	}
 ]
 
 default_host_uri = 'qemu+ssh://root@dlk-kvm.localdomain/system'
@@ -88,14 +128,14 @@ def doCmd(cmdline, return_output=False):
 	args = shlex.split(cmdline)
 	try:
 		#  Do command
-		output = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-		if output.stdout:
-			return str(output.stdout, 'utf-8')
+		output = subprocess.check_output(args, stderr=subprocess.STDOUT)
+		if return_output:
+			return output
 		else:
 			return True
 	except Exception as e:
-		print('Command failed: {}'.format(cmdline))
-		print('{}: {}'.format(e.returncode, e.output))
+		print 'Command failed: {}'.format(cmdline)
+		print '{}: {}'.format(e.returncode, e.output)
 		exc_type, exc_value, exc_traceback = sys.exc_info()
 		traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stdout)
 		sys.exit(1)
@@ -169,7 +209,7 @@ def blockJobCallback(conn, dom, disk, type, status, opaque):
 		#  Set flag indicating that the process is complete
 		finished = True
 	else:
-		print("UNEXPECTED JOB EVENT: Domain {}, job type {}, on disk {}, status {}".format(dom.name(), blockJobTypeToString(type), disk, blockJobStatusToString(status)))
+		print "UNEXPECTED JOB EVENT: Domain {}, job type {}, on disk {}, status {}".format(dom.name(), blockJobTypeToString(type), disk, blockJobStatusToString(status))
 def virEventLoopNativeRun():
 	while True:
 		libvirt.virEventRunDefaultImpl()
@@ -199,7 +239,7 @@ def backupVM(domain_name, uri, delete_old=False):
 	conn = libvirt.open(uri)
 	if conn == None:
 		log(logfile,'Unable to connect to {}'.format(uri))
-		print('Unable to connect to {}'.format(uri))
+		print 'Unable to connect to {}'.format(uri)
 		sys.exit(1)
 		
 	#  Get the domain object for this domain_name
@@ -207,12 +247,12 @@ def backupVM(domain_name, uri, delete_old=False):
 		domain = conn.lookupByName(domain_name)
 	except:
 		log(logfile, 'Unable to find a domain named "{}"'.format(domain_name))
-		print('Unable to find a domain named "{}"'.format(domain_name))
+		print 'Unable to find a domain named "{}"'.format(domain_name)
 		sys.exit(1)
 		
 	if domain.hasCurrentSnapshot():
 		log(logfile, '{} has snapshots, cannot back it up using this script'.format(domain_name))
-		print('{} has snapshots, cannot back it up using this script'.format(domain_name))
+		print '{} has snapshots, cannot back it up using this script'.format(domain_name)
 		sys.exit(1)
 
 	#  Open a zip file and add the domain XML description to it
@@ -246,7 +286,6 @@ def backupVM(domain_name, uri, delete_old=False):
 	if domain.isActive():
 		log(logfile, 'This domain is currently active, creating a domain snapshot')
 		if domain_name == 'fileserver':
-			#  Do not snapshot the RAID array on the fileserver system, it will not be backed up by this process
 			xml = '<domainsnapshot><name>{}</name><disks><disk name="vdb" snapshot="no"/></disks></domainsnapshot>'.format(snapshot_name)
 		else:
 			xml = '<domainsnapshot><name>{}</name></domainsnapshot>'.format(snapshot_name)
@@ -345,7 +384,7 @@ def main():
 	parser.add_option('-o', '--onecopy', action='store_true', dest='delete_old', default=False, help='If this backup succeeds, erase all previous backups for this VM from {}'.format(backup_target_dir))
 	(options, args) = parser.parse_args()
 	if len(args) != 1:
-		print(usage)
+		print usage
 		exit(1)
 	else:
 		#  Look for this doamin in the list of known domains
