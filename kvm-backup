@@ -82,8 +82,8 @@ def doCmd(cmdline, return_output=False):
 		else:
 			return True
 	except Exception as e:
-		print 'Command failed: {}'.format(cmdline)
-		print '{}: {}'.format(e.returncode, e.output)
+		print('Command failed: {}'.format(cmdline))
+		print('{}: {}'.format(e.returncode, e.output))
 		exc_type, exc_value, exc_traceback = sys.exc_info()
 		traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stdout)
 		sys.exit(1)
@@ -157,7 +157,7 @@ def blockJobCallback(conn, dom, disk, type, status, opaque):
 		#  Set flag indicating that the process is complete
 		finished = True
 	else:
-		print "UNEXPECTED JOB EVENT: Domain {}, job type {}, on disk {}, status {}".format(dom.name(), blockJobTypeToString(type), disk, blockJobStatusToString(status))
+		print("UNEXPECTED JOB EVENT: Domain {}, job type {}, on disk {}, status {}".format(dom.name(), blockJobTypeToString(type), disk, blockJobStatusToString(status)))
 def virEventLoopNativeRun():
 	while True:
 		libvirt.virEventRunDefaultImpl()
@@ -187,7 +187,7 @@ def backupVM(domain_name, uri, delete_old=False):
 	conn = libvirt.open(uri)
 	if conn == None:
 		log(logfile,'Unable to connect to {}'.format(uri))
-		print 'Unable to connect to {}'.format(uri)
+		print('Unable to connect to {}'.format(uri))
 		sys.exit(1)
 		
 	#  Get the domain object for this domain_name
@@ -195,12 +195,12 @@ def backupVM(domain_name, uri, delete_old=False):
 		domain = conn.lookupByName(domain_name)
 	except:
 		log(logfile, 'Unable to find a domain named "{}"'.format(domain_name))
-		print 'Unable to find a domain named "{}"'.format(domain_name)
+		print('Unable to find a domain named "{}"'.format(domain_name))
 		sys.exit(1)
 		
 	if domain.hasCurrentSnapshot():
 		log(logfile, '{} has snapshots, cannot back it up using this script'.format(domain_name))
-		print '{} has snapshots, cannot back it up using this script'.format(domain_name)
+		print('{} has snapshots, cannot back it up using this script'.format(domain_name))
 		sys.exit(1)
 
 	#  Open a zip file and add the domain XML description to it
@@ -332,7 +332,7 @@ def main():
 	parser.add_option('-o', '--onecopy', action='store_true', dest='delete_old', default=False, help='If this backup succeeds, erase all previous backups for this VM from {}'.format(backup_target_dir))
 	(options, args) = parser.parse_args()
 	if len(args) != 1:
-		print usage
+		print(usage)
 		exit(1)
 	else:
 		#  Look for this doamin in the list of known domains
